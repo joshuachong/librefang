@@ -207,7 +207,6 @@ MIT 라이선스. LICENSE 파일을 참조하세요.
 
 ## 링크
 
-- **다국어 버전:** [English](README.md) | [中文](README.zh.md) | [日本語](README.ja.md) | [한국어](README.ko.md) | [Español](README.es.md) | [Deutsch](README.de.md)
 - [GitHub](https://github.com/librefang/librefang)
 - [웹사이트](https://librefang.ai/)
 - [문서](https://docs.librefang.ai)

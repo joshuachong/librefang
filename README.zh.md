@@ -207,7 +207,6 @@ MIT 许可证。详见 LICENSE 文件。
 
 ## 链接
 
-- **多语言版本：** [English](README.md) | [中文](README.zh.md) | [日本語](README.ja.md) | [한국어](README.ko.md) | [Español](README.es.md) | [Deutsch](README.de.md)
 - [GitHub](https://github.com/librefang/librefang)
 - [网站](https://librefang.ai/)
 - [文档](https://docs.librefang.ai)

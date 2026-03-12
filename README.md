@@ -431,7 +431,6 @@ MIT License. See the LICENSE file for details.
 
 ## Links
 
-- **Translations:** [English](README.md) | [中文](README.zh.md) | [日本語](README.ja.md) | [한국어](README.ko.md) | [Español](README.es.md) | [Deutsch](README.de.md)
 - [GitHub](https://github.com/librefang/librefang)
 - [Website](https://librefang.ai/)
 - [Documentation](https://docs.librefang.ai)
