@@ -130,7 +130,7 @@ impl NostrAdapter {
                         use futures::SinkExt;
                         let send_result = ws
                             .send(tokio_tungstenite::tungstenite::Message::Text(
-                                event_msg.clone(),
+                                event_msg.clone().into(),
                             ))
                             .await;
 
@@ -227,7 +227,7 @@ impl ChannelAdapter for NostrAdapter {
                     };
 
                     if write
-                        .send(tokio_tungstenite::tungstenite::Message::Text(sub_msg))
+                        .send(tokio_tungstenite::tungstenite::Message::Text(sub_msg.into()))
                         .await
                         .is_err()
                     {
@@ -246,7 +246,9 @@ impl ChannelAdapter for NostrAdapter {
                                 let close_msg = serde_json::json!(["CLOSE", "openfang-sub"]);
                                 let _ = write.send(
                                     tokio_tungstenite::tungstenite::Message::Text(
-                                        serde_json::to_string(&close_msg).unwrap_or_default()
+                                        serde_json::to_string(&close_msg)
+                                            .unwrap_or_default()
+                                            .into()
                                     )
                                 ).await;
                                 return;

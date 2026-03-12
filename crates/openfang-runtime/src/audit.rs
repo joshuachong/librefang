@@ -133,8 +133,11 @@ impl AuditLog {
                         "ConfigChange" => AuditAction::ConfigChange,
                         _ => AuditAction::ToolInvoke, // fallback
                     };
+                    let seq_raw: i64 = row.get(0)?;
+                    let seq = u64::try_from(seq_raw)
+                        .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(0, seq_raw))?;
                     Ok(AuditEntry {
-                        seq: row.get(0)?,
+                        seq,
                         timestamp: row.get(1)?,
                         agent_id: row.get(2)?,
                         action,
