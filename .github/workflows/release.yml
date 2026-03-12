@@ -72,7 +72,7 @@ jobs:
           key: desktop-${{ matrix.platform.rust_target }}
 
       - name: Import macOS signing certificate
-        if: runner.os == 'macOS'
+        if: runner.os == 'macOS' && secrets.MAC_CERT_BASE64 != ''
         env:
           MAC_CERT_BASE64: ${{ secrets.MAC_CERT_BASE64 }}
           MAC_CERT_PASSWORD: ${{ secrets.MAC_CERT_PASSWORD }}
