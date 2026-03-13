@@ -3525,7 +3525,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-api"
-version = "0.3.57"
+version = "0.3.58"
 dependencies = [
  "async-trait",
  "axum",
@@ -3562,7 +3562,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-channels"
-version = "0.3.57"
+version = "0.3.58"
 dependencies = [
  "aes",
  "async-trait",
@@ -3598,7 +3598,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-cli"
-version = "0.3.57"
+version = "0.3.58"
 dependencies = [
  "clap",
  "clap_complete",
@@ -3628,7 +3628,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-desktop"
-version = "0.3.57"
+version = "0.3.58"
 dependencies = [
  "axum",
  "librefang-api",
@@ -3654,7 +3654,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-extensions"
-version = "0.3.57"
+version = "0.3.58"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -3682,7 +3682,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-hands"
-version = "0.3.57"
+version = "0.3.58"
 dependencies = [
  "chrono",
  "dashmap",
@@ -3699,7 +3699,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-kernel"
-version = "0.3.57"
+version = "0.3.58"
 dependencies = [
  "async-trait",
  "chrono",
@@ -3737,7 +3737,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-memory"
-version = "0.3.57"
+version = "0.3.58"
 dependencies = [
  "async-trait",
  "chrono",
@@ -3756,7 +3756,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-migrate"
-version = "0.3.57"
+version = "0.3.58"
 dependencies = [
  "chrono",
  "dirs 6.0.0",
@@ -3775,7 +3775,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-runtime"
-version = "0.3.57"
+version = "0.3.58"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3809,7 +3809,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-skills"
-version = "0.3.57"
+version = "0.3.58"
 dependencies = [
  "chrono",
  "hex",
@@ -3832,7 +3832,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-types"
-version = "0.3.57"
+version = "0.3.58"
 dependencies = [
  "async-trait",
  "chrono",
@@ -3851,7 +3851,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-wire"
-version = "0.3.57"
+version = "0.3.58"
 dependencies = [
  "async-trait",
  "chrono",
@@ -9425,7 +9425,7 @@ checksum = "b9cc00251562a284751c9973bace760d86c0276c471b4be569fe6b068ee97a56"
 
 [[package]]
 name = "xtask"
-version = "0.3.57"
+version = "0.3.58"
 
 [[package]]
 name = "yoke"
