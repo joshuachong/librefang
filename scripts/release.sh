@@ -141,9 +141,10 @@ git -C "$REPO_ROOT" add \
     sdk/python/setup.py \
     packages/whatsapp-gateway/package.json
 git -C "$REPO_ROOT" commit -m "chore: bump version to $TAG"
+git -C "$REPO_ROOT" tag "$TAG"
 
 echo ""
-echo "Created commit for $TAG"
+echo "Created commit and tag $TAG"
 
 # --- Create branch and push ---
 
@@ -162,6 +163,7 @@ if [[ "$push_confirm" =~ ^[Nn] ]]; then
 fi
 
 git -C "$REPO_ROOT" push -u origin "$RELEASE_BRANCH"
+git -C "$REPO_ROOT" push origin "$TAG"
 
 # --- Create PR ---
 
@@ -187,9 +189,7 @@ $RELEASE_BODY"
 
     echo "→ $PR_URL"
     echo ""
-    echo "After PR is merged, tag and release:"
-    echo "  git checkout main && git pull"
-    echo "  git tag $TAG && git push origin $TAG"
+    echo "After PR is merged, create the GitHub Release:"
     echo "  gh release create $TAG --repo librefang/librefang --title 'LibreFang $VERSION' --generate-notes"
 else
     echo ""
