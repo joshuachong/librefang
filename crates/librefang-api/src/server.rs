@@ -788,6 +788,33 @@ pub async fn run_daemon(
     info!("WebChat UI available at http://{addr}/",);
     info!("WebSocket endpoint: ws://{addr}/api/agents/{{id}}/ws",);
 
+    // Background: sync model catalog from community repo on startup, then every 24 hours
+    {
+        let kernel = state.kernel.clone();
+        tokio::spawn(async move {
+            loop {
+                match librefang_runtime::catalog_sync::sync_catalog().await {
+                    Ok(result) => {
+                        info!(
+                            "Model catalog synced: {} files downloaded",
+                            result.files_downloaded
+                        );
+                        if let Ok(mut catalog) = kernel.model_catalog.write() {
+                            catalog.load_default_cached_catalog();
+                            catalog.detect_auth();
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "Background catalog sync failed (will use cached/builtin): {e}"
+                        );
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(24 * 60 * 60)).await;
+            }
+        });
+    }
+
     // Use SO_REUSEADDR to allow binding immediately after reboot (avoids TIME_WAIT).
     let socket = socket2::Socket::new(
         if addr.is_ipv4() {
