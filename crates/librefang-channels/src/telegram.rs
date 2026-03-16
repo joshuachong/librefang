@@ -826,6 +826,28 @@ async fn parse_telegram_update(
         return None;
     };
 
+    // Extract reply-to-message context (Telegram `reply_to_message` field).
+    // Prepend the quoted original text so the agent sees what the user is replying to.
+    let content = if let Some(reply) = message.get("reply_to_message") {
+        let reply_text = reply["text"]
+            .as_str()
+            .or_else(|| reply["caption"].as_str());
+        if let Some(quoted) = reply_text {
+            let reply_sender = reply["from"]["first_name"]
+                .as_str()
+                .unwrap_or("Someone");
+            let prefix = format!("[Replying to {reply_sender}: \"{quoted}\"]\n");
+            match content {
+                ChannelContent::Text(t) => ChannelContent::Text(format!("{prefix}{t}")),
+                other => other, // 对 Command/Image 等不修改
+            }
+        } else {
+            content
+        }
+    } else {
+        content
+    };
+
     // Extract forum topic thread_id (Telegram sends this as `message_thread_id`
     // for messages inside forum topics / reply threads).
     let thread_id = message["message_thread_id"]
@@ -1633,6 +1655,69 @@ mod tests {
         });
         assert!(check_mention_entities(&message, "mybot"));
         assert!(!check_mention_entities(&message, "otherbot"));
+    }
+
+    #[tokio::test]
+    async fn test_parse_telegram_reply_to_message() {
+        // When a user replies to a specific message, the quoted context should be prepended.
+        let update = serde_json::json!({
+            "update_id": 700,
+            "message": {
+                "message_id": 100,
+                "from": { "id": 123, "first_name": "Bob" },
+                "chat": { "id": 123, "type": "private" },
+                "date": 1700000000,
+                "text": "I disagree with that",
+                "reply_to_message": {
+                    "message_id": 99,
+                    "from": { "id": 456, "first_name": "Alice" },
+                    "chat": { "id": 123, "type": "private" },
+                    "date": 1699999900,
+                    "text": "The sky is green"
+                }
+            }
+        });
+
+        let client = test_client();
+        let msg = parse_telegram_update(&update, &[], "fake:token", &client, DEFAULT_API_URL, None)
+            .await
+            .unwrap();
+        match &msg.content {
+            ChannelContent::Text(t) => {
+                assert!(t.starts_with("[Replying to Alice:"), "got: {t}");
+                assert!(t.contains("The sky is green"));
+                assert!(t.contains("I disagree with that"));
+            }
+            other => panic!("expected Text, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_parse_telegram_reply_to_message_no_text() {
+        // reply_to_message without text/caption should not modify the content.
+        let update = serde_json::json!({
+            "update_id": 701,
+            "message": {
+                "message_id": 101,
+                "from": { "id": 123, "first_name": "Bob" },
+                "chat": { "id": 123, "type": "private" },
+                "date": 1700000000,
+                "text": "What was that sticker?",
+                "reply_to_message": {
+                    "message_id": 100,
+                    "from": { "id": 456, "first_name": "Alice" },
+                    "chat": { "id": 123, "type": "private" },
+                    "date": 1699999900,
+                    "sticker": { "file_id": "abc123" }
+                }
+            }
+        });
+
+        let client = test_client();
+        let msg = parse_telegram_update(&update, &[], "fake:token", &client, DEFAULT_API_URL, None)
+            .await
+            .unwrap();
+        assert!(matches!(msg.content, ChannelContent::Text(ref t) if t == "What was that sticker?"));
     }
 
     #[test]
