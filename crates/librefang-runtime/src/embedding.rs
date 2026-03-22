@@ -232,9 +232,8 @@ impl BedrockEmbeddingDriver {
         region: Option<String>,
         dimensions_override: Option<usize>,
     ) -> Result<Self, EmbeddingError> {
-        let access_key = std::env::var("AWS_ACCESS_KEY_ID").map_err(|_| {
-            EmbeddingError::MissingApiKey("AWS_ACCESS_KEY_ID not set".to_string())
-        })?;
+        let access_key = std::env::var("AWS_ACCESS_KEY_ID")
+            .map_err(|_| EmbeddingError::MissingApiKey("AWS_ACCESS_KEY_ID not set".to_string()))?;
         let secret_key = std::env::var("AWS_SECRET_ACCESS_KEY").map_err(|_| {
             EmbeddingError::MissingApiKey("AWS_SECRET_ACCESS_KEY not set".to_string())
         })?;
@@ -276,8 +275,7 @@ fn sha256_hex(data: &[u8]) -> String {
 
 /// HMAC-SHA256.
 fn hmac_sha256(key: &[u8], data: &[u8]) -> Vec<u8> {
-    let mut mac =
-        HmacSha256::new_from_slice(key).expect("HMAC can take key of any size");
+    let mut mac = HmacSha256::new_from_slice(key).expect("HMAC can take key of any size");
     mac.update(data);
     mac.finalize().into_bytes().to_vec()
 }
@@ -324,9 +322,8 @@ fn sigv4_auth_header(
     };
 
     // Canonical request.
-    let canonical_request = format!(
-        "POST\n{uri_path}\n\n{canonical_headers}\n{signed_headers}\n{payload_hash}"
-    );
+    let canonical_request =
+        format!("POST\n{uri_path}\n\n{canonical_headers}\n{signed_headers}\n{payload_hash}");
 
     let credential_scope = format!("{date_stamp}/{region}/{service}/aws4_request");
     let string_to_sign = format!(
@@ -353,8 +350,9 @@ impl EmbeddingDriver for BedrockEmbeddingDriver {
 
         let url = self.invoke_url();
         // Parse host and path from URL for signing.
-        let parsed: url::Url =
-            url.parse().map_err(|e: url::ParseError| EmbeddingError::Http(e.to_string()))?;
+        let parsed: url::Url = url
+            .parse()
+            .map_err(|e: url::ParseError| EmbeddingError::Http(e.to_string()))?;
         let host = parsed
             .host_str()
             .ok_or_else(|| EmbeddingError::Http("no host in Bedrock URL".into()))?
@@ -446,11 +444,7 @@ pub fn create_embedding_driver(
         let region = custom_base_url
             .filter(|u| !u.is_empty())
             .map(|s| s.to_string());
-        let driver = BedrockEmbeddingDriver::new(
-            model.to_string(),
-            region,
-            dimensions_override,
-        )?;
+        let driver = BedrockEmbeddingDriver::new(model.to_string(), region, dimensions_override)?;
         return Ok(Box::new(driver));
     }
 
@@ -755,8 +749,18 @@ mod tests {
     #[test]
     fn test_sigv4_signing_key_deterministic() {
         // Ensure the signing key derivation is deterministic.
-        let key1 = sigv4_signing_key("wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY", "20260322", "us-east-1", "bedrock");
-        let key2 = sigv4_signing_key("wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY", "20260322", "us-east-1", "bedrock");
+        let key1 = sigv4_signing_key(
+            "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY",
+            "20260322",
+            "us-east-1",
+            "bedrock",
+        );
+        let key2 = sigv4_signing_key(
+            "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY",
+            "20260322",
+            "us-east-1",
+            "bedrock",
+        );
         assert_eq!(key1, key2);
         assert_eq!(key1.len(), 32); // HMAC-SHA256 output is 32 bytes
     }
@@ -792,13 +796,8 @@ mod tests {
         std::env::remove_var("AWS_ACCESS_KEY_ID");
         std::env::remove_var("AWS_SECRET_ACCESS_KEY");
 
-        let result = create_embedding_driver(
-            "bedrock",
-            "amazon.titan-embed-text-v2:0",
-            "",
-            None,
-            None,
-        );
+        let result =
+            create_embedding_driver("bedrock", "amazon.titan-embed-text-v2:0", "", None, None);
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(err_msg.contains("AWS_ACCESS_KEY_ID"));
@@ -819,16 +818,14 @@ mod tests {
         let had_secret = std::env::var("AWS_SECRET_ACCESS_KEY").ok();
         let had_region = std::env::var("AWS_REGION").ok();
         std::env::set_var("AWS_ACCESS_KEY_ID", "AKIAIOSFODNN7EXAMPLE");
-        std::env::set_var("AWS_SECRET_ACCESS_KEY", "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY");
+        std::env::set_var(
+            "AWS_SECRET_ACCESS_KEY",
+            "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY",
+        );
         std::env::set_var("AWS_REGION", "us-west-2");
 
-        let result = create_embedding_driver(
-            "bedrock",
-            "amazon.titan-embed-text-v2:0",
-            "",
-            None,
-            None,
-        );
+        let result =
+            create_embedding_driver("bedrock", "amazon.titan-embed-text-v2:0", "", None, None);
         assert!(result.is_ok());
         assert_eq!(result.unwrap().dimensions(), 1024);
 
@@ -853,7 +850,10 @@ mod tests {
         let had_key = std::env::var("AWS_ACCESS_KEY_ID").ok();
         let had_secret = std::env::var("AWS_SECRET_ACCESS_KEY").ok();
         std::env::set_var("AWS_ACCESS_KEY_ID", "AKIAIOSFODNN7EXAMPLE");
-        std::env::set_var("AWS_SECRET_ACCESS_KEY", "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY");
+        std::env::set_var(
+            "AWS_SECRET_ACCESS_KEY",
+            "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY",
+        );
 
         let result = create_embedding_driver(
             "bedrock",
