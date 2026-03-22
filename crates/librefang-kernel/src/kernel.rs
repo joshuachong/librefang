@@ -363,6 +363,9 @@ pub struct LibreFangKernel {
     /// Cache for workspace context, identity files, and skill metadata to avoid
     /// redundant filesystem I/O and registry scans on every message.
     prompt_metadata_cache: PromptMetadataCache,
+    /// Lazy-loading driver cache — avoids recreating HTTP clients for the same
+    /// provider/key/url combination on every agent message.
+    driver_cache: librefang_runtime::drivers::DriverCache,
 }
 
 /// Bounded in-memory delivery receipt tracker.
@@ -1437,6 +1440,7 @@ impl LibreFangKernel {
             self_handle: OnceLock::new(),
             provider_unconfigured_logged: std::sync::atomic::AtomicBool::new(false),
             prompt_metadata_cache: PromptMetadataCache::new(),
+            driver_cache: librefang_runtime::drivers::DriverCache::new(),
         };
 
         // Initialize proactive memory system (mem0-style) from config.
@@ -5064,6 +5068,8 @@ system_prompt = "You are a helpful assistant."
                 }
                 HotAction::ReloadProviderUrls => {
                     info!("Hot-reload: applying provider URL overrides");
+                    // Invalidate cached drivers — URLs/keys may have changed.
+                    self.driver_cache.clear();
                     let mut catalog = self
                         .model_catalog
                         .write()
@@ -5098,6 +5104,8 @@ system_prompt = "You are a helpful assistant."
                         "Hot-reload: updating default model to {}/{}",
                         new_config.default_model.provider, new_config.default_model.model
                     );
+                    // Invalidate cached drivers — the default provider may have changed.
+                    self.driver_cache.clear();
                     let mut guard = self
                         .default_model_override
                         .write()
@@ -5736,6 +5744,38 @@ system_prompt = "You are a helpful assistant."
             }
         }
 
+        // Periodic memory decay (deletes stale SESSION/AGENT memories by TTL)
+        {
+            let decay_config = self.config.memory.decay.clone();
+            if decay_config.enabled && decay_config.decay_interval_hours > 0 {
+                let kernel = Arc::clone(self);
+                let interval_hours = decay_config.decay_interval_hours;
+                tokio::spawn(async move {
+                    let mut interval = tokio::time::interval(std::time::Duration::from_secs(
+                        u64::from(interval_hours) * 3600,
+                    ));
+                    interval.tick().await; // Skip first immediate tick
+                    loop {
+                        interval.tick().await;
+                        if kernel.supervisor.is_shutting_down() {
+                            break;
+                        }
+                        match kernel.memory.run_decay(&decay_config) {
+                            Ok(n) => {
+                                if n > 0 {
+                                    info!(deleted = n, "Memory decay sweep completed");
+                                }
+                            }
+                            Err(e) => {
+                                warn!("Memory decay sweep failed: {e}");
+                            }
+                        }
+                    }
+                });
+                info!("Memory decay scheduled every {interval_hours} hour(s)");
+            }
+        }
+
         // Connect to configured + extension MCP servers
         let has_mcp = self
             .effective_mcp_servers
@@ -6059,7 +6099,7 @@ system_prompt = "You are a helpful assistant."
         use crate::heartbeat::{check_agents, is_quiet_hours, HeartbeatConfig};
 
         let kernel = Arc::clone(self);
-        let config = HeartbeatConfig::default();
+        let config = HeartbeatConfig::from_toml(&kernel.config.heartbeat);
         let interval_secs = config.check_interval_secs;
 
         tokio::spawn(async move {
@@ -6300,7 +6340,7 @@ system_prompt = "You are a helpful assistant."
                 skip_permissions: true,
             };
 
-            match drivers::create_driver(&driver_config) {
+            match self.driver_cache.get_or_create(&driver_config) {
                 Ok(d) => d,
                 Err(e) => {
                     // If fresh driver creation fails (e.g. key not yet set for this
@@ -6377,7 +6417,7 @@ system_prompt = "You are a helpful assistant."
                     azure_openai: self.config.azure_openai.clone(),
                     skip_permissions: true,
                 };
-                match drivers::create_driver(&config) {
+                match self.driver_cache.get_or_create(&config) {
                     Ok(d) => chain.push((d, fb.model.clone())),
                     Err(e) => {
                         warn!("Fallback driver '{}' failed to init: {e}", fb_provider);
