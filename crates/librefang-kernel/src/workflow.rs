@@ -1162,18 +1162,13 @@ impl WorkflowEngine {
                 let step = &workflow.steps[step_idx];
 
                 // Check if any dependency failed
-                let dep_failed = step
-                    .depends_on
-                    .iter()
-                    .any(|dep| failed_steps.contains(dep));
+                let dep_failed = step.depends_on.iter().any(|dep| failed_steps.contains(dep));
 
                 if dep_failed {
                     match step.error_mode {
                         ErrorMode::Fail => {
-                            let error_msg = format!(
-                                "Step '{}' skipped: dependency failed",
-                                step.name
-                            );
+                            let error_msg =
+                                format!("Step '{}' skipped: dependency failed", step.name);
                             if let Some(r) = self.runs.write().await.get_mut(&run_id) {
                                 r.state = WorkflowRunState::Failed;
                                 r.error = Some(error_msg.clone());
@@ -1198,8 +1193,7 @@ impl WorkflowEngine {
                 let prompt = Self::expand_variables(&step.prompt_template, input, &variables);
                 let start = std::time::Instant::now();
                 let result =
-                    Self::execute_step_with_error_mode(step, agent_id, prompt, send_message)
-                        .await;
+                    Self::execute_step_with_error_mode(step, agent_id, prompt, send_message).await;
                 let duration_ms = start.elapsed().as_millis() as u64;
 
                 match result {
@@ -1251,10 +1245,7 @@ impl WorkflowEngine {
                 for &step_idx in layer {
                     let step = &workflow.steps[step_idx];
 
-                    let dep_failed = step
-                        .depends_on
-                        .iter()
-                        .any(|dep| failed_steps.contains(dep));
+                    let dep_failed = step.depends_on.iter().any(|dep| failed_steps.contains(dep));
 
                     let (agent_id, agent_name) = agent_resolver(&step.agent)
                         .ok_or_else(|| format!("Agent not found for step '{}'", step.name))?;
@@ -1273,10 +1264,7 @@ impl WorkflowEngine {
                         let error_mode = step.error_mode.clone();
                         futures.push(Box::pin(async move {
                             if matches!(error_mode, ErrorMode::Fail) {
-                                Err(format!(
-                                    "Step '{}' skipped: dependency failed",
-                                    step_name
-                                ))
+                                Err(format!("Step '{}' skipped: dependency failed", step_name))
                             } else {
                                 Ok(None)
                             }
@@ -1284,10 +1272,7 @@ impl WorkflowEngine {
                             as std::pin::Pin<
                                 Box<
                                     dyn std::future::Future<
-                                        Output = Result<
-                                            Option<(String, u64, u64)>,
-                                            String,
-                                        >,
+                                        Output = Result<Option<(String, u64, u64)>, String>,
                                     >,
                                 >,
                             >);
@@ -1305,17 +1290,15 @@ impl WorkflowEngine {
                             match result {
                                 Ok(Ok(output)) => Ok(Some(output)),
                                 Ok(Err(e)) => match err_mode {
-                                    ErrorMode::Fail => Err(format!(
-                                        "Step '{}' failed: {}",
-                                        step_name, e
-                                    )),
+                                    ErrorMode::Fail => {
+                                        Err(format!("Step '{}' failed: {}", step_name, e))
+                                    }
                                     _ => Ok(None),
                                 },
                                 Err(_) => match err_mode {
-                                    ErrorMode::Fail => Err(format!(
-                                        "Step '{}' timed out",
-                                        step_name
-                                    )),
+                                    ErrorMode::Fail => {
+                                        Err(format!("Step '{}' timed out", step_name))
+                                    }
                                     _ => Ok(None),
                                 },
                             }
@@ -1323,10 +1306,7 @@ impl WorkflowEngine {
                             as std::pin::Pin<
                                 Box<
                                     dyn std::future::Future<
-                                        Output = Result<
-                                            Option<(String, u64, u64)>,
-                                            String,
-                                        >,
+                                        Output = Result<Option<(String, u64, u64)>, String>,
                                     >,
                                 >,
                             >);
@@ -2694,7 +2674,9 @@ id = "{id}"
         let steps = vec![
             WorkflowStep {
                 name: "A".to_string(),
-                agent: StepAgent::ByName { name: "a".to_string() },
+                agent: StepAgent::ByName {
+                    name: "a".to_string(),
+                },
                 prompt_template: "{{input}}".to_string(),
                 mode: StepMode::Sequential,
                 timeout_secs: 10,
@@ -2704,7 +2686,9 @@ id = "{id}"
             },
             WorkflowStep {
                 name: "B".to_string(),
-                agent: StepAgent::ByName { name: "a".to_string() },
+                agent: StepAgent::ByName {
+                    name: "a".to_string(),
+                },
                 prompt_template: "{{input}}".to_string(),
                 mode: StepMode::Sequential,
                 timeout_secs: 10,
@@ -2714,7 +2698,9 @@ id = "{id}"
             },
             WorkflowStep {
                 name: "C".to_string(),
-                agent: StepAgent::ByName { name: "a".to_string() },
+                agent: StepAgent::ByName {
+                    name: "a".to_string(),
+                },
                 prompt_template: "{{input}}".to_string(),
                 mode: StepMode::Sequential,
                 timeout_secs: 10,
@@ -2742,7 +2728,9 @@ id = "{id}"
             steps: vec![
                 WorkflowStep {
                     name: "A".to_string(),
-                    agent: StepAgent::ByName { name: "a".to_string() },
+                    agent: StepAgent::ByName {
+                        name: "a".to_string(),
+                    },
                     prompt_template: "Task A: {{input}}".to_string(),
                     mode: StepMode::Sequential,
                     timeout_secs: 10,
@@ -2752,7 +2740,9 @@ id = "{id}"
                 },
                 WorkflowStep {
                     name: "B".to_string(),
-                    agent: StepAgent::ByName { name: "a".to_string() },
+                    agent: StepAgent::ByName {
+                        name: "a".to_string(),
+                    },
                     prompt_template: "Task B: {{input}}".to_string(),
                     mode: StepMode::Sequential,
                     timeout_secs: 10,
@@ -2762,7 +2752,9 @@ id = "{id}"
                 },
                 WorkflowStep {
                     name: "C".to_string(),
-                    agent: StepAgent::ByName { name: "a".to_string() },
+                    agent: StepAgent::ByName {
+                        name: "a".to_string(),
+                    },
                     prompt_template: "Combine: {{a_result}} + {{b_result}}".to_string(),
                     mode: StepMode::Sequential,
                     timeout_secs: 10,
@@ -2909,9 +2901,8 @@ id = "{id}"
         let wf_id = engine.register(wf).await;
         let run_id = engine.create_run(wf_id, "data".to_string()).await.unwrap();
 
-        let sender = |_id: AgentId, msg: String| async move {
-            Ok((format!("Done: {msg}"), 10u64, 5u64))
-        };
+        let sender =
+            |_id: AgentId, msg: String| async move { Ok((format!("Done: {msg}"), 10u64, 5u64)) };
 
         let result = engine.execute_run(run_id, mock_resolver, sender).await;
         assert!(result.is_ok());
@@ -2925,7 +2916,9 @@ id = "{id}"
         let layers = WorkflowEngine::topological_sort(&[
             WorkflowStep {
                 name: "A".to_string(),
-                agent: StepAgent::ByName { name: "a".to_string() },
+                agent: StepAgent::ByName {
+                    name: "a".to_string(),
+                },
                 prompt_template: "".to_string(),
                 mode: StepMode::Sequential,
                 timeout_secs: 10,
@@ -2935,7 +2928,9 @@ id = "{id}"
             },
             WorkflowStep {
                 name: "B".to_string(),
-                agent: StepAgent::ByName { name: "a".to_string() },
+                agent: StepAgent::ByName {
+                    name: "a".to_string(),
+                },
                 prompt_template: "".to_string(),
                 mode: StepMode::Sequential,
                 timeout_secs: 10,
@@ -2945,7 +2940,9 @@ id = "{id}"
             },
             WorkflowStep {
                 name: "C".to_string(),
-                agent: StepAgent::ByName { name: "a".to_string() },
+                agent: StepAgent::ByName {
+                    name: "a".to_string(),
+                },
                 prompt_template: "".to_string(),
                 mode: StepMode::Sequential,
                 timeout_secs: 10,
@@ -2966,7 +2963,9 @@ id = "{id}"
         let steps = vec![
             WorkflowStep {
                 name: "A".to_string(),
-                agent: StepAgent::ByName { name: "a".to_string() },
+                agent: StepAgent::ByName {
+                    name: "a".to_string(),
+                },
                 prompt_template: "{{input}}".to_string(),
                 mode: StepMode::Sequential,
                 timeout_secs: 10,
@@ -2976,7 +2975,9 @@ id = "{id}"
             },
             WorkflowStep {
                 name: "B".to_string(),
-                agent: StepAgent::ByName { name: "a".to_string() },
+                agent: StepAgent::ByName {
+                    name: "a".to_string(),
+                },
                 prompt_template: "{{input}}".to_string(),
                 mode: StepMode::Sequential,
                 timeout_secs: 10,
@@ -3002,7 +3003,9 @@ id = "{id}"
             steps: vec![
                 WorkflowStep {
                     name: "A".to_string(),
-                    agent: StepAgent::ByName { name: "a".to_string() },
+                    agent: StepAgent::ByName {
+                        name: "a".to_string(),
+                    },
                     prompt_template: "{{input}}".to_string(),
                     mode: StepMode::Sequential,
                     timeout_secs: 10,
@@ -3012,7 +3015,9 @@ id = "{id}"
                 },
                 WorkflowStep {
                     name: "B".to_string(),
-                    agent: StepAgent::ByName { name: "a".to_string() },
+                    agent: StepAgent::ByName {
+                        name: "a".to_string(),
+                    },
                     prompt_template: "{{input}}".to_string(),
                     mode: StepMode::Sequential,
                     timeout_secs: 10,
