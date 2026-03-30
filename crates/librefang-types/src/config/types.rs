@@ -365,6 +365,10 @@ impl Default for WebFetchConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct BrowserConfig {
+    /// Enable the built-in CDP browser tools (browser_navigate, browser_click,
+    /// etc.).  Set to `false` when using an external browser MCP server such as
+    /// CamoFox, which replaces these tools with its own set.
+    pub enabled: bool,
     /// Run browser in headless mode (no visible window).
     pub headless: bool,
     /// Viewport width in pixels.
@@ -384,6 +388,7 @@ pub struct BrowserConfig {
 impl Default for BrowserConfig {
     fn default() -> Self {
         Self {
+            enabled: true,
             headless: true,
             viewport_width: 1280,
             viewport_height: 720,
@@ -2511,6 +2516,10 @@ pub struct McpServerConfigEntry {
     /// Environment variables to pass through (e.g., ["GITHUB_PERSONAL_ACCESS_TOKEN"]).
     #[serde(default)]
     pub env: Vec<String>,
+    /// Extra HTTP headers for SSE / Streamable-HTTP transports.
+    /// Each entry is `"Header-Name: value"` (e.g., `"Authorization: Bearer <token>"`).
+    #[serde(default)]
+    pub headers: Vec<String>,
 }
 
 fn default_mcp_timeout() -> u64 {
@@ -2591,6 +2600,8 @@ pub enum McpTransportEntry {
     },
     /// HTTP Server-Sent Events.
     Sse { url: String },
+    /// Streamable HTTP transport (MCP 2025-03-26+).
+    Http { url: String },
     /// Built-in compatibility adapter for plain HTTP/JSON tool backends.
     HttpCompat {
         base_url: String,
