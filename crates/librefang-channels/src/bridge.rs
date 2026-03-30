@@ -17,7 +17,9 @@ use librefang_types::agent::AgentId;
 use librefang_types::config::{ChannelOverrides, DmPolicy, GroupPolicy, OutputFormat};
 use librefang_types::message::ContentBlock;
 use regex::RegexSet;
+use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
+use std::time::Instant;
 use tokio::sync::{mpsc, watch};
 use tracing::{debug, error, info, warn};
 
@@ -332,6 +334,401 @@ pub trait ChannelBridgeHandle: Send + Sync {
     }
 }
 
+struct PendingMessage {
+    message: ChannelMessage,
+    image_blocks: Option<Vec<ContentBlock>>,
+}
+
+struct SenderBuffer {
+    messages: Vec<PendingMessage>,
+    first_arrived: Instant,
+    timer_handle: Option<tokio::task::JoinHandle<()>>,
+    max_timer_handle: Option<tokio::task::JoinHandle<()>>,
+}
+
+struct MessageDebouncer {
+    debounce_ms: u64,
+    debounce_max_ms: u64,
+    max_buffer: usize,
+    flush_tx: mpsc::UnboundedSender<String>,
+}
+
+impl MessageDebouncer {
+    fn new(
+        debounce_ms: u64,
+        debounce_max_ms: u64,
+        max_buffer: usize,
+    ) -> (Self, mpsc::UnboundedReceiver<String>) {
+        let (flush_tx, flush_rx) = mpsc::unbounded_channel();
+        (
+            Self {
+                debounce_ms,
+                debounce_max_ms,
+                max_buffer,
+                flush_tx,
+            },
+            flush_rx,
+        )
+    }
+
+    fn push(
+        &self,
+        key: &str,
+        pending: PendingMessage,
+        buffers: &mut HashMap<String, SenderBuffer>,
+    ) {
+        use std::time::Duration;
+        let debounce_dur = Duration::from_millis(self.debounce_ms);
+        let max_dur = Duration::from_millis(self.debounce_max_ms);
+
+        let buf = buffers.entry(key.to_string()).or_insert_with(|| {
+            let flush_tx = self.flush_tx.clone();
+            let flush_key = key.to_string();
+            let max_timer_handle = Some(tokio::spawn(async move {
+                tokio::time::sleep(max_dur).await;
+                let _ = flush_tx.send(flush_key);
+            }));
+            SenderBuffer {
+                messages: Vec::new(),
+                first_arrived: Instant::now(),
+                timer_handle: None,
+                max_timer_handle,
+            }
+        });
+        buf.messages.push(pending);
+
+        if let Some(handle) = buf.timer_handle.take() {
+            handle.abort();
+        }
+
+        let elapsed = buf.first_arrived.elapsed();
+        if elapsed >= max_dur || buf.messages.len() >= self.max_buffer {
+            if let Some(handle) = buf.max_timer_handle.take() {
+                handle.abort();
+            }
+            let _ = self.flush_tx.send(key.to_string());
+            return;
+        }
+
+        let remaining_cap = max_dur.saturating_sub(elapsed);
+        let delay = debounce_dur.min(remaining_cap);
+        let flush_tx = self.flush_tx.clone();
+        let flush_key = key.to_string();
+        buf.timer_handle = Some(tokio::spawn(async move {
+            tokio::time::sleep(delay).await;
+            let _ = flush_tx.send(flush_key);
+        }));
+    }
+
+    fn on_typing(&self, key: &str, is_typing: bool, buffers: &mut HashMap<String, SenderBuffer>) {
+        use std::time::Duration;
+        let Some(buf) = buffers.get_mut(key) else {
+            return;
+        };
+
+        let max_dur = Duration::from_millis(self.debounce_max_ms);
+        let elapsed = buf.first_arrived.elapsed();
+        if elapsed >= max_dur {
+            let _ = self.flush_tx.send(key.to_string());
+            return;
+        }
+
+        if let Some(handle) = buf.timer_handle.take() {
+            handle.abort();
+        }
+
+        if !is_typing {
+            let remaining_cap = max_dur.saturating_sub(elapsed);
+            let delay = Duration::from_millis(self.debounce_ms).min(remaining_cap);
+            let flush_tx = self.flush_tx.clone();
+            let flush_key = key.to_string();
+            buf.timer_handle = Some(tokio::spawn(async move {
+                tokio::time::sleep(delay).await;
+                let _ = flush_tx.send(flush_key);
+            }));
+        }
+    }
+
+    fn drain(
+        &self,
+        key: &str,
+        buffers: &mut HashMap<String, SenderBuffer>,
+    ) -> Option<(ChannelMessage, Option<Vec<ContentBlock>>)> {
+        let buf = buffers.remove(key)?;
+        if buf.messages.is_empty() {
+            return None;
+        }
+
+        if let Some(handle) = buf.max_timer_handle {
+            handle.abort();
+        }
+        if let Some(handle) = buf.timer_handle {
+            handle.abort();
+        }
+
+        let mut messages = buf.messages;
+        if messages.len() == 1 {
+            let pm = messages.remove(0);
+            return Some((pm.message, pm.image_blocks));
+        }
+
+        let first = messages.remove(0);
+        let mut merged_msg = first.message;
+        let mut all_blocks: Vec<ContentBlock> = Vec::new();
+
+        if let Some(blocks) = first.image_blocks {
+            all_blocks.extend(blocks);
+        }
+
+        let first_content_type = std::mem::discriminant(&merged_msg.content);
+        let mut all_same_type = true;
+        let mut all_commands_same_name: Option<String> = None;
+
+        if matches!(merged_msg.content, ChannelContent::Command { .. }) {
+            if let ChannelContent::Command { name, .. } = &merged_msg.content {
+                all_commands_same_name = Some(name.clone());
+            }
+        }
+
+        for pm in &messages {
+            if std::mem::discriminant(&pm.message.content) != first_content_type {
+                all_same_type = false;
+                break;
+            }
+            if let Some(name) = &all_commands_same_name {
+                if let ChannelContent::Command { name: n, .. } = &pm.message.content {
+                    if n != name {
+                        all_commands_same_name = None;
+                        break;
+                    }
+                } else {
+                    all_commands_same_name = None;
+                    break;
+                }
+            }
+        }
+
+        if all_same_type {
+            if let Some(command_name) = all_commands_same_name {
+                let mut cmd_args: Vec<String> = Vec::new();
+                if let ChannelContent::Command { args, .. } = &merged_msg.content {
+                    cmd_args.extend(args.clone());
+                }
+                for pm in messages {
+                    if let ChannelContent::Command { args, .. } = pm.message.content {
+                        cmd_args.extend(args);
+                    }
+                    if let Some(blocks) = pm.image_blocks {
+                        all_blocks.extend(blocks);
+                    }
+                }
+                merged_msg.content = ChannelContent::Command {
+                    name: command_name,
+                    args: cmd_args,
+                };
+            } else {
+                let mut text_parts = vec![content_to_text(&merged_msg.content)];
+                for pm in messages {
+                    text_parts.push(content_to_text(&pm.message.content));
+                    if let Some(blocks) = pm.image_blocks {
+                        all_blocks.extend(blocks);
+                    }
+                }
+                merged_msg.content = ChannelContent::Text(text_parts.join("\n"));
+            }
+        } else {
+            let mut text_parts = vec![content_to_text(&merged_msg.content)];
+            for pm in messages {
+                text_parts.push(content_to_text(&pm.message.content));
+                if let Some(blocks) = pm.image_blocks {
+                    all_blocks.extend(blocks);
+                }
+            }
+            merged_msg.content = ChannelContent::Text(text_parts.join("\n"));
+        }
+
+        let blocks = if all_blocks.is_empty() {
+            None
+        } else {
+            Some(all_blocks)
+        };
+
+        Some((merged_msg, blocks))
+    }
+}
+
+fn content_to_text(content: &ChannelContent) -> String {
+    match content {
+        ChannelContent::Text(t) => t.clone(),
+        ChannelContent::Command { name, args } => {
+            if args.is_empty() {
+                format!("/{name}")
+            } else {
+                format!("/{name} {}", args.join(" "))
+            }
+        }
+        ChannelContent::Image { url, caption, .. } => match caption {
+            Some(c) => format!("[Photo: {url}]\n{c}"),
+            None => format!("[Photo: {url}]"),
+        },
+        ChannelContent::File { url, filename } => format!("[File ({filename}): {url}]"),
+        ChannelContent::Voice {
+            url,
+            duration_seconds,
+            caption,
+        } => {
+            let cap = caption.as_deref().unwrap_or("");
+            if cap.is_empty() {
+                format!("[Voice message ({duration_seconds}s): {url}]")
+            } else {
+                format!("[Voice message ({duration_seconds}s): {url}] {cap}")
+            }
+        }
+        ChannelContent::Video {
+            url,
+            caption,
+            duration_seconds,
+            ..
+        } => match caption {
+            Some(c) => format!("[Video ({duration_seconds}s): {url}]\n{c}"),
+            None => format!("[Video ({duration_seconds}s): {url}]"),
+        },
+        ChannelContent::Location { lat, lon } => format!("[Location: {lat}, {lon}]"),
+        ChannelContent::FileData { filename, .. } => format!("[File: {filename}]"),
+        ChannelContent::Interactive { text, .. } => text.clone(),
+        ChannelContent::ButtonCallback { action, .. } => format!("[Button: {action}]"),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn flush_debounced(
+    debouncer: &MessageDebouncer,
+    key: &str,
+    buffers: &mut HashMap<String, SenderBuffer>,
+    handle: &Arc<dyn ChannelBridgeHandle>,
+    router: &Arc<AgentRouter>,
+    adapter: &Arc<dyn ChannelAdapter>,
+    rate_limiter: &ChannelRateLimiter,
+    sanitizer: &Arc<InputSanitizer>,
+    semaphore: &Arc<tokio::sync::Semaphore>,
+) -> Option<tokio::task::JoinHandle<()>> {
+    let (merged_msg, blocks) = debouncer.drain(key, buffers)?;
+
+    let channel_handle = (*handle).clone();
+    let router = router.clone();
+    let adapter = adapter.clone();
+    let rate_limiter = rate_limiter.clone();
+    let sanitizer = Arc::clone(sanitizer);
+    let sem = semaphore.clone();
+
+    let join_handle = tokio::spawn(async move {
+        let _permit = match sem.acquire().await {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+
+        if let Some(mut blocks) = blocks {
+            let text = content_to_text(&merged_msg.content);
+            if !text.is_empty() {
+                blocks.insert(
+                    0,
+                    ContentBlock::Text {
+                        text,
+                        provider_metadata: None,
+                    },
+                );
+            }
+
+            let ct_str = channel_type_str(&merged_msg.channel);
+
+            // --- Input sanitization (prompt injection detection) ---
+            if !sanitizer.is_off() {
+                let text_to_check: Option<&str> = match &merged_msg.content {
+                    ChannelContent::Text(t) => Some(t.as_str()),
+                    ChannelContent::Image { caption, .. } => caption.as_deref(),
+                    ChannelContent::Voice { caption, .. } => caption.as_deref(),
+                    ChannelContent::Video { caption, .. } => caption.as_deref(),
+                    _ => None,
+                };
+                if let Some(text) = text_to_check {
+                    match sanitizer.check(text) {
+                        SanitizeResult::Clean => {}
+                        SanitizeResult::Warned(reason) => {
+                            warn!(
+                                channel = ct_str,
+                                user = %merged_msg.sender.display_name,
+                                reason = reason.as_str(),
+                                "Suspicious channel input (warn mode, allowing through)"
+                            );
+                        }
+                        SanitizeResult::Blocked(reason) => {
+                            warn!(
+                                channel = ct_str,
+                                user = %merged_msg.sender.display_name,
+                                reason = reason.as_str(),
+                                "Blocked channel input (prompt injection detected)"
+                            );
+                            let _ = adapter
+                                .send(
+                                    &merged_msg.sender,
+                                    ChannelContent::Text(
+                                        "Your message could not be processed.".to_string(),
+                                    ),
+                                )
+                                .await;
+                            return;
+                        }
+                    }
+                }
+            }
+
+            let overrides = channel_handle
+                .channel_overrides(
+                    ct_str,
+                    merged_msg
+                        .metadata
+                        .get("account_id")
+                        .and_then(|v| v.as_str()),
+                )
+                .await;
+            let channel_default_format = default_output_format_for_channel(ct_str);
+            let output_format = overrides
+                .as_ref()
+                .and_then(|o| o.output_format)
+                .unwrap_or(channel_default_format);
+            let threading_enabled = overrides.as_ref().map(|o| o.threading).unwrap_or(false);
+            let thread_id = if threading_enabled {
+                merged_msg.thread_id.as_deref()
+            } else {
+                None
+            };
+
+            dispatch_with_blocks(
+                blocks,
+                &merged_msg,
+                &channel_handle,
+                &router,
+                adapter.as_ref(),
+                ct_str,
+                thread_id,
+                output_format,
+            )
+            .await;
+        } else {
+            dispatch_message(
+                &merged_msg,
+                &channel_handle,
+                &router,
+                adapter.as_ref(),
+                &rate_limiter,
+                &sanitizer,
+            )
+            .await;
+        }
+    });
+    Some(join_handle)
+}
+
 /// Owns all running channel adapters and dispatches messages to agents.
 pub struct BridgeManager {
     handle: Arc<dyn ChannelBridgeHandle>,
@@ -401,59 +798,154 @@ impl BridgeManager {
         let adapter_clone = adapter.clone();
         let mut shutdown = self.shutdown_rx.clone();
 
-        // Limit concurrent dispatch tasks to prevent unbounded growth.
-        // 32 is generous — most setups have 1-5 concurrent users.
+        let ct_str = channel_type_str(&adapter.channel_type()).to_string();
+        let overrides = handle.channel_overrides(&ct_str, None).await;
+        let debounce_ms = overrides
+            .as_ref()
+            .map(|o| o.message_debounce_ms)
+            .unwrap_or(0);
+        let debounce_max_ms = overrides
+            .as_ref()
+            .map(|o| o.message_debounce_max_ms)
+            .unwrap_or(30000);
+        let max_buffer = overrides
+            .as_ref()
+            .map(|o| o.message_debounce_max_buffer)
+            .unwrap_or(64);
+
         let semaphore = Arc::new(tokio::sync::Semaphore::new(32));
 
-        let task = tokio::spawn(async move {
-            let mut stream = std::pin::pin!(stream);
-            loop {
-                tokio::select! {
-                    msg = stream.next() => {
-                        match msg {
-                            Some(message) => {
-                                // Spawn each dispatch as a concurrent task so the stream
-                                // loop is never blocked by slow LLM calls. The kernel's
-                                // per-agent lock ensures session integrity.
-                                let handle = handle.clone();
-                                let router = router.clone();
-                                let adapter = adapter_clone.clone();
-                                let rate_limiter = rate_limiter.clone();
-                                let sanitizer = sanitizer.clone();
-                                let sem = semaphore.clone();
-                                tokio::spawn(async move {
-                                    // Acquire semaphore permit (blocks if 32 tasks are in flight).
-                                    let _permit = match sem.acquire().await {
-                                        Ok(p) => p,
-                                        Err(_) => return, // semaphore closed — shutting down
-                                    };
-                                    dispatch_message(
-                                        &message,
-                                        &handle,
-                                        &router,
-                                        adapter.as_ref(),
-                                        &rate_limiter,
-                                        &sanitizer,
-                                    ).await;
-                                });
+        if debounce_ms == 0 {
+            // Fast path: no debouncing (current behavior)
+            let task = tokio::spawn(async move {
+                let mut stream = std::pin::pin!(stream);
+                loop {
+                    tokio::select! {
+                        msg = stream.next() => {
+                            match msg {
+                                Some(message) => {
+                                    let handle = handle.clone();
+                                    let router = router.clone();
+                                    let adapter = adapter_clone.clone();
+                                    let rate_limiter = rate_limiter.clone();
+                                    let sanitizer = sanitizer.clone();
+                                    let sem = semaphore.clone();
+                                    tokio::spawn(async move {
+                                        let _permit = match sem.acquire().await {
+                                            Ok(p) => p,
+                                            Err(_) => return,
+                                        };
+                                        dispatch_message(
+                                            &message,
+                                            &handle,
+                                            &router,
+                                            adapter.as_ref(),
+                                            &rate_limiter,
+                                            &sanitizer,
+                                        ).await;
+                                    });
+                                }
+                                None => {
+                                    info!("Channel adapter {} stream ended", adapter_clone.name());
+                                    break;
+                                }
                             }
-                            None => {
-                                info!("Channel adapter {} stream ended", adapter_clone.name());
+                        }
+                        _ = shutdown.changed() => {
+                            if *shutdown.borrow() {
+                                info!("Shutting down channel adapter {}", adapter_clone.name());
                                 break;
                             }
                         }
                     }
-                    _ = shutdown.changed() => {
-                        if *shutdown.borrow() {
-                            info!("Shutting down channel adapter {}", adapter_clone.name());
-                            break;
+                }
+            });
+            self.tasks.push(task);
+        } else {
+            // Debounce path
+            let (debouncer, mut flush_rx) =
+                MessageDebouncer::new(debounce_ms, debounce_max_ms, max_buffer);
+            let mut buffers: HashMap<String, SenderBuffer> = HashMap::new();
+
+            let mut typing_rx = adapter_clone.typing_events();
+
+            let task = tokio::spawn(async move {
+                let mut stream = std::pin::pin!(stream);
+                loop {
+                    tokio::select! {
+                        msg = stream.next() => {
+                            match msg {
+                                Some(message) => {
+                                    let sender_key = format!(
+                                        "{}:{}",
+                                        channel_type_str(&message.channel),
+                                        message.sender.platform_id
+                                    );
+
+                                    let image_blocks = if let ChannelContent::Image {
+                                        ref url, ref caption, ref mime_type
+                                    } = message.content {
+                                        match download_image_to_blocks(url, caption.as_deref(), mime_type.as_deref()).await {
+                                            blocks if blocks.iter().any(|b| matches!(b, ContentBlock::Image { .. })) => Some(blocks),
+                                            _ => None,
+                                        }
+                                    } else {
+                                        None
+                                    };
+
+                                    let pending = PendingMessage { message, image_blocks };
+                                    debouncer.push(&sender_key, pending, &mut buffers);
+                                }
+                                None => {
+                                    let keys: Vec<String> = buffers.keys().cloned().collect();
+                                    let mut handles = Vec::new();
+                                    for key in keys {
+                                        if let Some(handle) = flush_debounced(&debouncer, &key, &mut buffers, &handle, &router, &adapter_clone, &rate_limiter, &sanitizer, &semaphore) {
+                                            handles.push(handle);
+                                        }
+                                    }
+                                    for handle in handles {
+                                        let _ = handle.await;
+                                    }
+                                    info!("Channel adapter {} stream ended", adapter_clone.name());
+                                    break;
+                                }
+                            }
+                        }
+                        Some(event) = async {
+                            match typing_rx.as_mut() {
+                                Some(rx) => rx.recv().await,
+                                None => std::future::pending::<Option<crate::types::TypingEvent>>().await,
+                            }
+                        } => {
+                            let sender_key = format!("{}:{}", channel_type_str(&event.channel), event.sender.platform_id);
+                            debouncer.on_typing(&sender_key, event.is_typing, &mut buffers);
+                        }
+                        Some(key) = flush_rx.recv() => {
+                            let _ = flush_debounced(&debouncer, &key, &mut buffers, &handle, &router, &adapter_clone, &rate_limiter, &sanitizer, &semaphore);
+                        }
+                        _ = shutdown.changed() => {
+                            if *shutdown.borrow() {
+                                let keys: Vec<String> = buffers.keys().cloned().collect();
+                                let mut handles = Vec::new();
+                                for key in keys {
+                                    if let Some(handle) = flush_debounced(&debouncer, &key, &mut buffers, &handle, &router, &adapter_clone, &rate_limiter, &sanitizer, &semaphore) {
+                                        handles.push(handle);
+                                    }
+                                }
+                                for handle in handles {
+                                    let _ = handle.await;
+                                }
+                                info!("Shutting down channel adapter {}", adapter_clone.name());
+                                break;
+                            }
                         }
                     }
                 }
-            }
-        });
+            });
+            self.tasks.push(task);
+        }
 
-        self.tasks.push(task);
         self.adapters.push(adapter);
         Ok(())
     }
@@ -2642,5 +3134,331 @@ mod tests {
             media_type_from_url("https://api.telegram.org/file/bot123/photos/file_42"),
             "image/jpeg"
         );
+    }
+
+    #[test]
+    fn test_content_to_text_command() {
+        let cmd = ChannelContent::Command {
+            name: "help".to_string(),
+            args: vec!["list".to_string()],
+        };
+        assert_eq!(content_to_text(&cmd), "/help list");
+    }
+
+    #[test]
+    fn test_content_to_text_command_no_args() {
+        let cmd = ChannelContent::Command {
+            name: "status".to_string(),
+            args: vec![],
+        };
+        assert_eq!(content_to_text(&cmd), "/status");
+    }
+
+    #[test]
+    fn test_content_to_text_text() {
+        let text = ChannelContent::Text("hello world".to_string());
+        assert_eq!(content_to_text(&text), "hello world");
+    }
+
+    #[test]
+    fn test_content_to_text_image() {
+        let img = ChannelContent::Image {
+            url: "https://example.com/photo.jpg".to_string(),
+            caption: Some("A cat".to_string()),
+            mime_type: None,
+        };
+        assert_eq!(
+            content_to_text(&img),
+            "[Photo: https://example.com/photo.jpg]\nA cat"
+        );
+    }
+
+    #[test]
+    fn test_content_to_text_image_no_caption() {
+        let img = ChannelContent::Image {
+            url: "https://example.com/photo.jpg".to_string(),
+            caption: None,
+            mime_type: None,
+        };
+        assert_eq!(
+            content_to_text(&img),
+            "[Photo: https://example.com/photo.jpg]"
+        );
+    }
+
+    #[test]
+    fn test_content_to_text_file() {
+        let file = ChannelContent::File {
+            url: "https://example.com/doc.pdf".to_string(),
+            filename: "document.pdf".to_string(),
+        };
+        assert_eq!(
+            content_to_text(&file),
+            "[File (document.pdf): https://example.com/doc.pdf]"
+        );
+    }
+
+    #[test]
+    fn test_content_to_text_voice() {
+        let voice = ChannelContent::Voice {
+            url: "https://example.com/voice.ogg".to_string(),
+            duration_seconds: 30,
+            caption: None,
+        };
+        assert_eq!(
+            content_to_text(&voice),
+            "[Voice message (30s): https://example.com/voice.ogg]"
+        );
+    }
+
+    #[test]
+    fn test_content_to_text_button_callback() {
+        let cb = ChannelContent::ButtonCallback {
+            action: "approve".to_string(),
+            message_text: Some("Approved".to_string()),
+        };
+        assert_eq!(content_to_text(&cb), "[Button: approve]");
+    }
+
+    mod message_debouncer {
+        use super::*;
+        use std::collections::HashMap;
+
+        fn make_test_message(text: &str) -> ChannelMessage {
+            ChannelMessage {
+                channel: ChannelType::Discord,
+                platform_message_id: "msg1".to_string(),
+                sender: ChannelUser {
+                    platform_id: "user123".to_string(),
+                    display_name: "TestUser".to_string(),
+                    librefang_user: None,
+                },
+                content: ChannelContent::Text(text.to_string()),
+                target_agent: None,
+                timestamp: chrono::Utc::now(),
+                is_group: false,
+                thread_id: None,
+                metadata: HashMap::new(),
+            }
+        }
+
+        fn make_test_command(name: &str, args: Vec<String>) -> ChannelMessage {
+            ChannelMessage {
+                channel: ChannelType::Discord,
+                platform_message_id: "msg1".to_string(),
+                sender: ChannelUser {
+                    platform_id: "user123".to_string(),
+                    display_name: "TestUser".to_string(),
+                    librefang_user: None,
+                },
+                content: ChannelContent::Command {
+                    name: name.to_string(),
+                    args,
+                },
+                target_agent: None,
+                timestamp: chrono::Utc::now(),
+                is_group: false,
+                thread_id: None,
+                metadata: HashMap::new(),
+            }
+        }
+
+        fn assert_content_eq(actual: &ChannelContent, expected: &str) {
+            let actual_text = content_to_text(actual);
+            assert_eq!(actual_text, expected);
+        }
+
+        #[tokio::test]
+        async fn test_debouncer_single_message() {
+            let (debouncer, _rx) = MessageDebouncer::new(100, 5000, 10);
+            let mut buffers: HashMap<String, SenderBuffer> = HashMap::new();
+
+            let msg = make_test_message("hello");
+            let pending = PendingMessage {
+                message: msg.clone(),
+                image_blocks: None,
+            };
+
+            debouncer.push("discord:user123", pending, &mut buffers);
+
+            let result = debouncer.drain("discord:user123", &mut buffers);
+            assert!(result.is_some());
+            let (drained_msg, blocks) = result.unwrap();
+            assert_content_eq(&drained_msg.content, "hello");
+            assert!(blocks.is_none());
+        }
+
+        #[tokio::test]
+        async fn test_debouncer_multiple_texts_merge() {
+            let (debouncer, _rx) = MessageDebouncer::new(100, 5000, 10);
+            let mut buffers: HashMap<String, SenderBuffer> = HashMap::new();
+
+            let msg1 = make_test_message("hello");
+            let msg2 = make_test_message("world");
+
+            debouncer.push(
+                "discord:user123",
+                PendingMessage {
+                    message: msg1,
+                    image_blocks: None,
+                },
+                &mut buffers,
+            );
+            debouncer.push(
+                "discord:user123",
+                PendingMessage {
+                    message: msg2,
+                    image_blocks: None,
+                },
+                &mut buffers,
+            );
+
+            let result = debouncer.drain("discord:user123", &mut buffers);
+            assert!(result.is_some());
+            let (drained_msg, _) = result.unwrap();
+            assert_content_eq(&drained_msg.content, "hello\nworld");
+        }
+
+        #[tokio::test]
+        async fn test_debouncer_commands_same_name_merge() {
+            let (debouncer, _rx) = MessageDebouncer::new(100, 5000, 10);
+            let mut buffers: HashMap<String, SenderBuffer> = HashMap::new();
+
+            let cmd1 = make_test_command("help", vec!["list".to_string()]);
+            let cmd2 = make_test_command("help", vec!["status".to_string()]);
+
+            debouncer.push(
+                "discord:user123",
+                PendingMessage {
+                    message: cmd1,
+                    image_blocks: None,
+                },
+                &mut buffers,
+            );
+            debouncer.push(
+                "discord:user123",
+                PendingMessage {
+                    message: cmd2,
+                    image_blocks: None,
+                },
+                &mut buffers,
+            );
+
+            let result = debouncer.drain("discord:user123", &mut buffers);
+            assert!(result.is_some());
+            let (drained_msg, _) = result.unwrap();
+            match drained_msg.content {
+                ChannelContent::Command { name, args } => {
+                    assert_eq!(name, "help");
+                    assert_eq!(args, vec!["list", "status"]);
+                }
+                _ => panic!("Expected Command content"),
+            }
+        }
+
+        #[tokio::test]
+        async fn test_debouncer_different_commands_no_merge() {
+            let (debouncer, _rx) = MessageDebouncer::new(100, 5000, 10);
+            let mut buffers: HashMap<String, SenderBuffer> = HashMap::new();
+
+            let cmd1 = make_test_command("help", vec![]);
+            let cmd2 = make_test_command("status", vec![]);
+
+            debouncer.push(
+                "discord:user123",
+                PendingMessage {
+                    message: cmd1,
+                    image_blocks: None,
+                },
+                &mut buffers,
+            );
+            debouncer.push(
+                "discord:user123",
+                PendingMessage {
+                    message: cmd2,
+                    image_blocks: None,
+                },
+                &mut buffers,
+            );
+
+            let result = debouncer.drain("discord:user123", &mut buffers);
+            assert!(result.is_some());
+            let (drained_msg, _) = result.unwrap();
+            assert_content_eq(&drained_msg.content, "/help\n/status");
+        }
+
+        #[tokio::test]
+        async fn test_debouncer_empty_buffer_returns_none() {
+            let (debouncer, _rx) = MessageDebouncer::new(100, 5000, 10);
+            let mut buffers: HashMap<String, SenderBuffer> = HashMap::new();
+
+            let result = debouncer.drain("discord:user123", &mut buffers);
+            assert!(result.is_none());
+        }
+
+        #[tokio::test]
+        async fn test_debouncer_different_senders_separate() {
+            let (debouncer, _rx) = MessageDebouncer::new(100, 5000, 10);
+            let mut buffers: HashMap<String, SenderBuffer> = HashMap::new();
+
+            let msg1 = make_test_message("hello from user1");
+            let msg2 = make_test_message("hello from user2");
+
+            debouncer.push(
+                "discord:user1",
+                PendingMessage {
+                    message: msg1,
+                    image_blocks: None,
+                },
+                &mut buffers,
+            );
+            debouncer.push(
+                "discord:user2",
+                PendingMessage {
+                    message: msg2,
+                    image_blocks: None,
+                },
+                &mut buffers,
+            );
+
+            let result1 = debouncer.drain("discord:user1", &mut buffers);
+            let result2 = debouncer.drain("discord:user2", &mut buffers);
+
+            assert!(result1.is_some());
+            assert!(result2.is_some());
+            assert_content_eq(&result1.unwrap().0.content, "hello from user1");
+            assert_content_eq(&result2.unwrap().0.content, "hello from user2");
+        }
+
+        #[tokio::test]
+        async fn test_debouncer_max_buffer_triggers_flush() {
+            let (debouncer, _rx) = MessageDebouncer::new(1000, 5000, 2);
+            let mut buffers: HashMap<String, SenderBuffer> = HashMap::new();
+
+            let msg1 = make_test_message("1");
+            let msg2 = make_test_message("2");
+
+            debouncer.push(
+                "discord:user123",
+                PendingMessage {
+                    message: msg1,
+                    image_blocks: None,
+                },
+                &mut buffers,
+            );
+            debouncer.push(
+                "discord:user123",
+                PendingMessage {
+                    message: msg2,
+                    image_blocks: None,
+                },
+                &mut buffers,
+            );
+
+            let result = debouncer.drain("discord:user123", &mut buffers);
+            assert!(result.is_some());
+            let (drained_msg, _) = result.unwrap();
+            assert_content_eq(&drained_msg.content, "1\n2");
+        }
     }
 }
