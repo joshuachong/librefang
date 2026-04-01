@@ -103,27 +103,7 @@ pub fn run(args: DevArgs) -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
-    // Start daemon
-    println!("Starting daemon on port {}...", args.port);
-    println!("  Binary: {}", binary.display());
-    println!("  Press Ctrl+C to stop\n");
-
-    let status = Command::new(&binary)
-        .args(["start", "--foreground"])
-        .env("LIBREFANG_PORT", args.port.to_string())
-        .current_dir(&root)
-        .status()?;
-
-    // Cleanup dashboard if it was started
-    if let Some(mut child) = _dashboard_child {
-        let _ = child.kill();
-    }
-
-    if !status.success() {
-        return Err("Daemon exited with error".into());
-    }
-
-    Ok(())
+    run_watch(&args, &root, &binary, _dashboard_child)
 }
 
 /// Kill stale processes on API and dashboard ports.
@@ -177,6 +157,89 @@ fn reqwest_probe(url: &str) -> bool {
         .output()
         .map(|o| !o.stdout.is_empty() && o.stdout != b"000")
         .unwrap_or(false)
+}
+
+/// Watch crates/ for changes, rebuild librefang-cli, then kill + restart the daemon.
+fn run_watch(
+    args: &DevArgs,
+    root: &std::path::Path,
+    binary: &std::path::Path,
+    dashboard_child: Option<std::process::Child>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Auto-install cargo-watch if missing
+    let has_watch = Command::new("cargo")
+        .args(["watch", "--version"])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if !has_watch {
+        println!("cargo-watch not found, installing...");
+        let status = Command::new("cargo")
+            .args(["install", "cargo-watch"])
+            .status()?;
+        if !status.success() {
+            return Err("Failed to install cargo-watch".into());
+        }
+    }
+
+    let binary_str = binary.display().to_string();
+    let port = args.port;
+
+    // Start the daemon first so it's available immediately
+    println!("Starting daemon on port {port} (watch mode)...");
+    println!("  Binary: {binary_str}");
+    println!("  Watching: crates/");
+    println!("  Press Ctrl+C to stop\n");
+
+    let _ = Command::new(binary)
+        .args(["start", "--foreground"])
+        .env("LIBREFANG_PORT", port.to_string())
+        .spawn()?;
+
+    // After every successful rebuild: kill the old daemon by port, start a new one.
+    // Environment variables (API keys etc.) are inherited from the current shell.
+    // Wrapped in a subshell so cargo-watch's appended '; echo ...' doesn't produce '&;' syntax error.
+    let rebuild_and_restart = format!(
+        "(cargo build -p librefang-cli && \
+         for pid in $(lsof -ti :{port} -sTCP:LISTEN 2>/dev/null); do kill -9 $pid 2>/dev/null; done; \
+         sleep 0.3; \
+         LIBREFANG_PORT={port} {binary} start --foreground &)",
+        port = port,
+        binary = binary_str,
+    );
+
+    let cargo_watch_status = Command::new("cargo")
+        .args(["watch", "--watch", "crates", "-s", &rebuild_and_restart])
+        .current_dir(root)
+        .status()?;
+
+    // Cleanup dashboard on exit
+    if let Some(mut child) = dashboard_child {
+        let _ = child.kill();
+    }
+    // Kill daemon on exit
+    for pid in get_pids_on_port(port) {
+        let _ = Command::new("kill").args(["-9", &pid]).output();
+    }
+
+    if !cargo_watch_status.success() {
+        return Err("cargo-watch exited with error".into());
+    }
+    Ok(())
+}
+
+/// Return PIDs listening on the given port.
+fn get_pids_on_port(port: u16) -> Vec<String> {
+    Command::new("lsof")
+        .args(["-ti", &format!(":{port}"), "-sTCP:LISTEN"])
+        .output()
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .split_whitespace()
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Resolve the LibreFang home directory (mirrors kernel logic).
