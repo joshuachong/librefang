@@ -80,13 +80,13 @@ impl VerboseLevel {
 // ---------------------------------------------------------------------------
 
 /// Global connection tracker (DashMap<IpAddr, AtomicUsize>).
-fn ws_tracker() -> &'static DashMap<IpAddr, AtomicUsize> {
+pub fn ws_tracker() -> &'static DashMap<IpAddr, AtomicUsize> {
     static TRACKER: std::sync::OnceLock<DashMap<IpAddr, AtomicUsize>> = std::sync::OnceLock::new();
     TRACKER.get_or_init(DashMap::new)
 }
 
 /// RAII guard that decrements the connection count on drop.
-struct WsConnectionGuard {
+pub struct WsConnectionGuard {
     ip: IpAddr,
 }
 
@@ -104,7 +104,7 @@ impl Drop for WsConnectionGuard {
 
 /// Try to acquire a WS connection slot for the given IP.
 /// Returns None if the IP has reached `max_ws_per_ip`.
-fn try_acquire_ws_slot(ip: IpAddr, max_ws_per_ip: usize) -> Option<WsConnectionGuard> {
+pub fn try_acquire_ws_slot(ip: IpAddr, max_ws_per_ip: usize) -> Option<WsConnectionGuard> {
     let entry = ws_tracker()
         .entry(ip)
         .or_insert_with(|| AtomicUsize::new(0));
@@ -114,6 +114,46 @@ fn try_acquire_ws_slot(ip: IpAddr, max_ws_per_ip: usize) -> Option<WsConnectionG
         return None;
     }
     Some(WsConnectionGuard { ip })
+}
+
+// ---------------------------------------------------------------------------
+// Terminal Connection Tracking
+// ---------------------------------------------------------------------------
+
+/// Global connection tracker for terminal WebSocket connections.
+pub fn terminal_ws_tracker() -> &'static DashMap<IpAddr, AtomicUsize> {
+    static TRACKER: std::sync::OnceLock<DashMap<IpAddr, AtomicUsize>> = std::sync::OnceLock::new();
+    TRACKER.get_or_init(DashMap::new)
+}
+
+/// RAII guard that decrements the terminal connection count on drop.
+pub struct TerminalWsGuard {
+    ip: IpAddr,
+}
+
+impl Drop for TerminalWsGuard {
+    fn drop(&mut self) {
+        if let Some(entry) = terminal_ws_tracker().get(&self.ip) {
+            let prev = entry.value().fetch_sub(1, Ordering::Relaxed);
+            if prev <= 1 {
+                drop(entry);
+                terminal_ws_tracker().remove(&self.ip);
+            }
+        }
+    }
+}
+
+/// Try to acquire a terminal WS connection slot for the given IP.
+pub fn try_acquire_terminal_ws_slot(ip: IpAddr, max_per_ip: usize) -> Option<TerminalWsGuard> {
+    let entry = terminal_ws_tracker()
+        .entry(ip)
+        .or_insert_with(|| AtomicUsize::new(0));
+    let current = entry.value().fetch_add(1, Ordering::Relaxed);
+    if current >= max_per_ip {
+        entry.value().fetch_sub(1, Ordering::Relaxed);
+        return None;
+    }
+    Some(TerminalWsGuard { ip })
 }
 
 // ---------------------------------------------------------------------------
@@ -1178,7 +1218,7 @@ async fn flush_text_buffer(
 }
 
 /// Helper to send a JSON value over WebSocket.
-async fn send_json(
+pub async fn send_json(
     sender: &Arc<Mutex<SplitSink<WebSocket, Message>>>,
     value: &serde_json::Value,
 ) -> Result<(), axum::Error> {
